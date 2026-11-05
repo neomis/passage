@@ -1,0 +1,450 @@
+#!/bin/bash
+# Passage privileged helper.
+#
+# Runs as root. launchd starts one copy per connection on /var/run/passage.sock
+# (inetd style: the socket is stdin/stdout). The socket is owned by the user who
+# installed the helper and has mode 0600, so only that user can talk to it.
+#
+# Protocol: the client sends "key=value" lines and a blank line. The helper
+# replies with "info: ..." progress lines and ends with "ok: ..." or "error: ...".
+#
+#   cmd=version                      -> ok: <version>
+#   cmd=status                       -> ok: connected <id> <ifname> <ip> <since> | ok: disconnected
+#   cmd=down                         -> ok: disconnected
+#   cmd=up + connection settings     -> ok: connected <ifname> <ip>
+#
+# Every value is validated against a strict pattern before it is used, because
+# it ends up in config files that root programs (pppd, strongSwan) read.
+
+set -uo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+umask 022
+
+HELPER_VERSION=4
+
+RUN_DIR=/var/run/passage                 # root-only, holds secrets while connected
+STATUS_FILE=/var/run/passage.status      # world-readable, no secrets
+LOCK_DIR=/var/run/passage.lock
+LOG_DIR=/var/log/passage
+SC_KEY=State:/Network/Service/passage
+L2TP_PLUGIN=/System/Library/SystemConfiguration/PPPController.bundle/Contents/PlugIns/L2TP.ppp
+
+BREW=""
+for p in /opt/homebrew /usr/local; do
+  [[ -x "$p/opt/strongswan/libexec/ipsec/charon" ]] && { BREW="$p"; break; }
+done
+CHARON="$BREW/opt/strongswan/libexec/ipsec/charon"
+SWANCTL="$BREW/opt/strongswan/bin/swanctl"
+# Passage's own strongSwan control socket, so leftovers from other strongSwan
+# setups in /var/run can't block it.
+VICI_URI="unix://$RUN_DIR/charon.vici"
+sw() { "$SWANCTL" --uri "$VICI_URI" "$@"; }
+
+reply() { printf '%s\n' "$*" 2>/dev/null || true; }
+info()  { reply "info: $*"; }
+
+# --- request parsing & validation -------------------------------------------
+
+RE_BOOL='^[01]$'
+RE_HOST='^[A-Za-z0-9]([A-Za-z0-9.-]{0,252})$'
+RE_ID='^[A-Za-z0-9-]{1,64}$'
+RE_IKEID='^[A-Za-z0-9@._:=,+-]{0,255}$'
+RE_ALGS='^[a-z0-9_!,-]*$'   # length checked separately (macOS regex caps repeats at 255)
+RE_NUM='^[0-9]{1,7}$'
+RE_IPV4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+RE_IPLIST='^(([0-9]{1,3}\.){3}[0-9]{1,3})?(,([0-9]{1,3}\.){3}[0-9]{1,3})*$'
+RE_CIDRLIST='^(([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2})?(,([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2})*$'
+RE_DOMLIST='^([A-Za-z0-9.-]{1,253})?(,[A-Za-z0-9.-]{1,253})*$'
+
+valid_text() { # printable, single line, not too long
+  local v="$1"
+  [[ ${#v} -le 512 ]] || return 1
+  [[ "$v" != *[[:cntrl:]]* ]]
+}
+
+validate() { # validate <key> <value>
+  local k="$1" v="$2"
+  case "$k" in
+    cmd)              [[ "$v" =~ ^(up|down|status|version)$ ]] ;;
+    id)               [[ "$v" =~ $RE_ID ]] ;;
+    gateway)          [[ "$v" =~ $RE_HOST ]] ;;
+    username|password|psk|nt_domain) valid_text "$v" ;;
+    remote_id|local_id) [[ "$v" =~ $RE_IKEID ]] ;;
+    ike|esp)          [[ ${#v} -le 512 && "$v" =~ $RE_ALGS ]] ;;
+    ike_lifetime|sa_lifetime|mtu|mru) [[ "$v" =~ $RE_NUM ]] ;;
+    ipsec|legacy|forceencaps|ipcomp|pfs|refuse_pap|refuse_chap|refuse_mschap|refuse_mschapv2|refuse_eap|\
+    mppe|mppe128|mppe_stateful|bsdcomp|deflate|vj|pcomp|accomp|echo|default_route|ignore_auto_dns)
+                      [[ "$v" =~ $RE_BOOL ]] ;;
+    routes)           [[ "$v" =~ $RE_CIDRLIST ]] ;;
+    dns)              [[ "$v" =~ $RE_IPLIST ]] ;;
+    search)           [[ "$v" =~ $RE_DOMLIST ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+# Defaults for everything optional.
+R_cmd=""; R_id=""; R_gateway=""; R_username=""; R_password=""; R_psk=""; R_nt_domain=""
+R_remote_id=""; R_local_id=""; R_ike=""; R_esp=""; R_ike_lifetime=10800; R_sa_lifetime=3600
+R_ipsec=1; R_legacy=0; R_forceencaps=0; R_ipcomp=0; R_pfs=1
+R_refuse_pap=0; R_refuse_chap=0; R_refuse_mschap=0; R_refuse_mschapv2=0; R_refuse_eap=0
+R_mppe=0; R_mppe128=0; R_mppe_stateful=0; R_bsdcomp=0; R_deflate=0; R_vj=1; R_pcomp=1; R_accomp=1
+R_echo=1; R_mtu=1400; R_mru=1400; R_default_route=1; R_routes=""; R_ignore_auto_dns=0; R_dns=""; R_search=""
+
+read_request() {
+  local line key val n=0
+  while IFS= read -r -t 30 line; do
+    line="${line%$'\r'}"
+    [[ -z "$line" ]] && return 0
+    (( ++n > 100 )) && { reply "error: request too long"; exit 0; }
+    [[ "$line" == *=* ]] || { reply "error: bad request line"; exit 0; }
+    key="${line%%=*}"; val="${line#*=}"
+    if ! validate "$key" "$val"; then
+      [[ "$key" =~ ^(password|psk)$ ]] && val="(hidden)"
+      reply "error: invalid value for '$key'"; exit 0
+    fi
+    printf -v "R_$key" '%s' "$val"
+  done
+  [[ -n "$R_cmd" ]] || { reply "error: no command"; exit 0; }
+}
+
+# Escape a value for a double-quoted strongSwan / pppd string.
+q() { local s="${1//\\/\\\\}"; printf '"%s"' "${s//\"/\\\"}"; }
+
+# --- connection state ---------------------------------------------------------
+
+is_connected() {
+  [[ -f "$STATUS_FILE" ]] || return 1
+  local ifname; ifname="$(awk -F= '/^ifname=/{print $2}' "$STATUS_FILE")"
+  [[ -n "$ifname" ]] && ifconfig "$ifname" >/dev/null 2>&1
+}
+
+status_line() {
+  if is_connected; then
+    local id ifname ip since
+    id="$(awk -F= '/^id=/{print $2}' "$STATUS_FILE")"
+    ifname="$(awk -F= '/^ifname=/{print $2}' "$STATUS_FILE")"
+    ip="$(awk -F= '/^ip=/{print $2}' "$STATUS_FILE")"
+    since="$(awk -F= '/^since=/{print $2}' "$STATUS_FILE")"
+    echo "connected $id $ifname $ip $since"
+  else
+    echo "disconnected"
+  fi
+}
+
+# Read root-written state without sourcing it.
+state_get() { [[ -f "$RUN_DIR/state" ]] && awk -F= -v k="$1" '$1==k{print substr($0, length(k)+2)}' "$RUN_DIR/state"; }
+
+do_down() {
+  local server_ip ifname routes r
+  server_ip="$(state_get SERVER_IP || true)"
+  ifname="$(state_get IFNAME || true)"
+  routes="$(state_get ROUTES || true)"
+
+  # Stop pppd and wait until it has exited so the next connection starts clean.
+  if [[ -f "$RUN_DIR/pppd.pid" ]]; then kill "$(cat "$RUN_DIR/pppd.pid")" 2>/dev/null || true; fi
+  pkill -f "pppd file $RUN_DIR/ppp.options" 2>/dev/null || true
+  for _ in $(seq 1 20); do pgrep -f "pppd file $RUN_DIR/ppp.options" >/dev/null || break; sleep 0.5; done
+  pkill -9 -f "pppd file $RUN_DIR/ppp.options" 2>/dev/null || true
+
+  if [[ -n "$ifname" ]]; then
+    for r in $routes; do route -q -n delete -net "$r" -interface "$ifname" >/dev/null 2>&1 || true; done
+  fi
+  printf 'remove %s/IPv4\nremove %s/DNS\n' "$SC_KEY" "$SC_KEY" | scutil >/dev/null 2>&1 || true
+
+  if [[ -n "$BREW" ]]; then
+    sw --terminate --ike passage --force >/dev/null 2>&1 || true
+  fi
+  if [[ -f "$RUN_DIR/charon.pid" ]]; then kill "$(cat "$RUN_DIR/charon.pid")" 2>/dev/null || true; fi
+  for _ in $(seq 1 10); do
+    [[ -f "$RUN_DIR/charon.pid" ]] && kill -0 "$(cat "$RUN_DIR/charon.pid")" 2>/dev/null || break
+    sleep 0.5
+  done
+
+  [[ -n "$server_ip" ]] && route -q -n delete -host "$server_ip" >/dev/null 2>&1
+  rm -rf "$RUN_DIR" "$STATUS_FILE"   # removes the files holding the password/PSK
+  return 0
+}
+
+fail() { do_down; reply "error: $*"; exit 0; }
+
+# Add a Diffie-Hellman group to ESP proposals that lack one (for PFS).
+add_pfs_group() { # add_pfs_group <esp proposals> <ike proposals>
+  local esp="$1" ike="$2" dh out="" p
+  dh="$(echo "${ike%%,*}" | grep -oE '(modp[0-9]+|ecp[0-9]+|curve25519|curve448)$' || true)"
+  [[ -z "$dh" ]] && { echo "$esp"; return; }
+  IFS=',' read -r -a parts <<< "$esp"
+  for p in "${parts[@]}"; do
+    [[ "$p" =~ (modp|ecp|curve) ]] || p="$p-$dh"
+    out="${out:+$out,}$p"
+  done
+  echo "$out"
+}
+
+do_up() {
+  [[ -n "$R_id" && -n "$R_gateway" && -n "$R_username" ]] || fail "missing id, gateway or username"
+  [[ -n "$R_password" ]] || fail "missing password"
+  [[ -d "$L2TP_PLUGIN" ]] || fail "macOS L2TP plugin not found"
+  if [[ "$R_ipsec" == 1 ]]; then
+    [[ -n "$BREW" ]] || fail "strongSwan not found. Install it with: brew install strongswan"
+    [[ -n "$R_psk" ]] || fail "missing IPsec pre-shared key"
+  fi
+  is_connected && fail "already connected"
+
+  local server_ip orig_gw
+  if [[ "$R_gateway" =~ $RE_IPV4 ]]; then server_ip="$R_gateway"
+  else server_ip="$(dig +short +time=3 +tries=2 "$R_gateway" | grep -E "$RE_IPV4" | head -1)"; fi
+  [[ -n "$server_ip" ]] || fail "could not resolve $R_gateway"
+  orig_gw="$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')"
+  [[ -n "$orig_gw" ]] || fail "no network connection"
+  info "Server $R_gateway ($server_ip)"
+
+  do_down   # clear anything left from a previous connection
+
+  mkdir -p "$LOG_DIR"; chmod 755 "$LOG_DIR"
+  rm -f "$LOG_DIR"/*.log.old
+  for f in charon.log ppp.log charon-startup.log pppd-startup.log; do
+    rm -f "$LOG_DIR/$f"; install -m 644 /dev/null "$LOG_DIR/$f"
+  done
+
+  mkdir -p "$RUN_DIR"; chmod 700 "$RUN_DIR"
+  umask 077
+
+  printf 'SERVER_IP=%s\nORIG_GW=%s\n' "$server_ip" "$orig_gw" > "$RUN_DIR/state"
+  route -q -n add -host "$server_ip" "$orig_gw" >/dev/null 2>&1 || true
+
+  # 1) IPsec (strongSwan)
+  if [[ "$R_ipsec" == 1 ]]; then
+    local ike esp
+    ike="${R_ike//!/}"; [[ -z "$ike" ]] && ike="default"
+    esp="${R_esp//!/}"
+    [[ "$R_pfs" == 1 && -n "$esp" ]] && esp="$(add_pfs_group "$esp" "$ike")"
+    [[ -z "$esp" ]] && esp="default"
+    if [[ "$R_legacy" == 1 ]]; then
+      ike="$ike,aes256-sha1-modp1024,aes128-sha1-modp1024,3des-sha1-modp1024"
+      esp="$esp,aes256-sha1,aes128-sha1,3des-sha1"
+    fi
+    local encap=no ipcomp=no
+    [[ "$R_forceencaps" == 1 ]] && encap=yes
+    [[ "$R_ipcomp" == 1 ]] && ipcomp=yes
+
+    cat > "$RUN_DIR/strongswan.conf" <<EOF
+charon {
+  load_modular = yes
+  install_routes = no
+  plugins {
+    include $BREW/etc/strongswan.d/charon/*.conf
+    vici {
+      socket = $VICI_URI
+    }
+    stroke {
+      load = no
+    }
+  }
+  filelog {
+    passage {
+      path = $LOG_DIR/charon.log
+      time_format = %H:%M:%S
+      default = 1
+      ike = 2
+      cfg = 2
+      knl = 2
+    }
+  }
+}
+include $BREW/etc/strongswan.d/*.conf
+EOF
+
+    cat > "$RUN_DIR/swanctl.conf" <<EOF
+connections {
+  passage {
+    version = 1
+    remote_addrs = $server_ip
+    proposals = $ike
+    encap = $encap
+    rekey_time = ${R_ike_lifetime}s
+    dpd_delay = 30s
+    local {
+      auth = psk
+$( [[ -n "$R_local_id" ]] && echo "      id = $(q "$R_local_id")" )
+    }
+    remote {
+      auth = psk
+$( [[ -n "$R_remote_id" ]] && echo "      id = $(q "$R_remote_id")" )
+    }
+    children {
+      l2tp {
+        mode = transport
+        local_ts = dynamic[udp]
+        remote_ts = dynamic[udp/1701]
+        esp_proposals = $esp
+        ipcomp = $ipcomp
+        rekey_time = ${R_sa_lifetime}s
+        dpd_action = clear
+      }
+    }
+  }
+}
+secrets {
+  ike-passage {
+    secret = $(q "$R_psk")
+  }
+}
+EOF
+
+    info "Starting IPsec"
+    # (No nohup: there's no terminal to hang up, and launchd's AbandonProcessGroup
+    # keeps this running after the helper exits.)
+    STRONGSWAN_CONF="$RUN_DIR/strongswan.conf" "$CHARON" </dev/null >>"$LOG_DIR/charon-startup.log" 2>&1 &
+    echo $! > "$RUN_DIR/charon.pid"
+    for _ in $(seq 1 20); do sw --stats >/dev/null 2>&1 && break; sleep 0.5; done
+    sw --stats >/dev/null 2>&1 || fail "strongSwan did not start: $(grep -iE 'fail|error|abort|nohup|denied' "$LOG_DIR/charon-startup.log" "$LOG_DIR/charon.log" 2>/dev/null | tail -1 | cut -c1-200)"
+
+    local load_err
+    load_err="$(sw --load-all --file "$RUN_DIR/swanctl.conf" 2>&1 >/dev/null)" \
+      || fail "IPsec settings rejected: ${load_err:-unknown error}"
+
+    info "Negotiating IPsec"
+    sw --initiate --child l2tp --timeout 20 </dev/null >/dev/null 2>&1 \
+      || fail "IPsec failed. Check the pre-shared key, algorithms and your network (see logs)"
+  fi
+
+  # 2) L2TP + PPP (macOS pppd and its L2TP plugin)
+  local user="$R_username"
+  [[ -n "$R_nt_domain" ]] && user="$R_nt_domain\\$R_username"
+  {
+    echo "plugin $L2TP_PLUGIN"
+    echo "l2tpnoipsec"
+    echo "remoteaddress $server_ip"
+    echo "user $(q "$user")"
+    echo "password $(q "$R_password")"
+    echo "noauth"
+    [[ "$R_refuse_pap" == 1 ]]      && echo "refuse-pap"
+    [[ "$R_refuse_chap" == 1 ]]     && echo "refuse-chap"
+    [[ "$R_refuse_mschap" == 1 ]]   && echo "refuse-mschap"
+    [[ "$R_refuse_mschapv2" == 1 ]] && echo "refuse-mschap-v2"
+    [[ "$R_refuse_eap" == 1 ]]      && echo "refuse-eap"
+    if [[ "$R_mppe" == 1 ]]; then
+      echo "mppe-128"
+      [[ "$R_mppe128" == 1 ]] || echo "mppe-40"
+      [[ "$R_mppe_stateful" == 1 ]] || echo "mppe-stateless"
+    fi
+    if [[ "$R_bsdcomp" == 1 ]]; then echo "bsdcomp 15"; else echo "nobsdcomp"; fi
+    if [[ "$R_deflate" == 1 ]]; then echo "deflate 15"; else echo "nodeflate"; fi
+    [[ "$R_mppe" == 0 && "$R_bsdcomp" == 0 && "$R_deflate" == 0 ]] && echo "noccp"
+    [[ "$R_vj" == 1 ]]     || echo "novj"
+    [[ "$R_pcomp" == 1 ]]  || echo "nopcomp"
+    [[ "$R_accomp" == 1 ]] || echo "noaccomp"
+    if [[ "$R_echo" == 1 ]]; then echo "lcp-echo-interval 30"; echo "lcp-echo-failure 4"; fi
+    echo "mtu $R_mtu"
+    echo "mru $R_mru"
+    echo "noipdefault"
+    echo "ipcp-accept-local"
+    echo "ipcp-accept-remote"
+    echo "usepeerdns"
+    echo "nodetach"
+    echo "debug"
+    echo "logfile $LOG_DIR/ppp.log"
+  } > "$RUN_DIR/ppp.options"
+
+  info "Logging in as $R_username"
+  local ifname="" local_ip="" remote_ip="" ppp_pid attempt
+  for attempt in 1 2; do
+    pppd file "$RUN_DIR/ppp.options" </dev/null >>"$LOG_DIR/pppd-startup.log" 2>&1 &
+    ppp_pid=$!
+    echo "$ppp_pid" > "$RUN_DIR/pppd.pid"
+    for _ in $(seq 1 40); do
+      kill -0 "$ppp_pid" 2>/dev/null || break
+      if grep -q "local  IP address" "$LOG_DIR/ppp.log" 2>/dev/null; then
+        local_ip="$(awk '/local  IP address/{print $NF}' "$LOG_DIR/ppp.log" | tail -1)"
+        remote_ip="$(awk '/remote IP address/{print $NF}' "$LOG_DIR/ppp.log" | tail -1)"
+        ifname="$(grep -oE 'Using interface ppp[0-9]+' "$LOG_DIR/ppp.log" | tail -1 | awk '{print $3}')"
+        break
+      fi
+      sleep 0.5
+    done
+    [[ -n "$local_ip" ]] && break
+    if [[ $attempt == 1 ]] && grep -q "Address already in use" "$LOG_DIR/ppp.log" 2>/dev/null; then
+      info "L2TP port busy, retrying"
+      kill "$ppp_pid" 2>/dev/null || true
+      sleep 3
+      continue
+    fi
+    break
+  done
+
+  if [[ -z "$local_ip" ]]; then
+    grep -qiE "authentication failed" "$LOG_DIR/ppp.log" 2>/dev/null && fail "username or password rejected by the server"
+    fail "L2TP/PPP did not come up (see logs)"
+  fi
+  [[ "$local_ip" =~ $RE_IPV4 ]] || fail "unexpected address from server"
+  [[ -n "$ifname" ]] || ifname="$(ifconfig -l | tr ' ' '\n' | grep '^ppp' | tail -1)"
+  [[ "$remote_ip" =~ $RE_IPV4 ]] || remote_ip="$local_ip"
+  echo "IFNAME=$ifname" >> "$RUN_DIR/state"
+
+  # 3) Routes
+  local routes="" r
+  if [[ "$R_default_route" == 1 ]]; then
+    routes="0.0.0.0/1 128.0.0.0/1"   # beats the normal default route without removing it
+  fi
+  routes="$routes ${R_routes//,/ }"
+  for r in $routes; do route -q -n add -net "$r" -interface "$ifname" >/dev/null 2>&1 || true; done
+  echo "ROUTES=$routes" >> "$RUN_DIR/state"
+
+  # 4) DNS
+  local dns=""
+  if [[ "$R_ignore_auto_dns" == 0 ]]; then
+    dns="$(awk '/primary   DNS address|secondary DNS address/{print $NF}' "$LOG_DIR/ppp.log" | grep -E "$RE_IPV4" | sort -u | tr '\n' ' ')"
+  fi
+  dns="$dns ${R_dns//,/ }"
+  {
+    echo "d.init"
+    echo "d.add Addresses * $local_ip"
+    echo "d.add DestAddresses * $remote_ip"
+    echo "d.add InterfaceName $ifname"
+    echo "d.add Router $remote_ip"
+    [[ "$R_default_route" == 1 ]] && echo "d.add OverridePrimary # 1"
+    echo "set $SC_KEY/IPv4"
+    if [[ -n "${dns// /}" ]]; then
+      echo "d.init"
+      echo "d.add ServerAddresses * $dns"
+      [[ -n "$R_search" ]] && echo "d.add SearchDomains * ${R_search//,/ }"
+      if [[ "$R_default_route" == 0 && -n "$R_search" ]]; then
+        echo "d.add SupplementalMatchDomains * ${R_search//,/ }"
+      fi
+      echo "set $SC_KEY/DNS"
+    fi
+  } | scutil
+
+  umask 022
+  printf 'id=%s\nifname=%s\nip=%s\nsince=%s\n' "$R_id" "$ifname" "$local_ip" "$(date +%s)" > "$STATUS_FILE"
+  chmod 644 "$STATUS_FILE"
+
+  reply "ok: connected $ifname $local_ip"
+}
+
+# --- main ---------------------------------------------------------------------
+
+read_request
+
+case "$R_cmd" in
+  version) reply "ok: $HELPER_VERSION"; exit 0 ;;
+  status)  reply "ok: $(status_line)"; exit 0 ;;
+esac
+
+[[ $EUID -eq 0 ]] || { reply "error: the helper must run as root"; exit 0; }
+
+# up/down change system state: one at a time.
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  # A lock older than two minutes is left over from a crash.
+  if [[ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +2 2>/dev/null)" ]]; then
+    rmdir "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || { reply "error: busy"; exit 0; }
+  else
+    reply "error: another connect/disconnect is in progress"; exit 0
+  fi
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
+case "$R_cmd" in
+  up)   do_up ;;
+  down) do_down; reply "ok: disconnected" ;;
+esac

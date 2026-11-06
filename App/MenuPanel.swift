@@ -207,10 +207,25 @@ enum LampIcon {
         let ink = look == .lit ? NSColor.labelColor : NSColor.black
         let light = NSColor(srgbRed: 1.0, green: 0.78, blue: 0.24, alpha: 1)
 
-        if look == .lit {   // soft halo behind the lantern
-            let c = NSPoint(x: 9, y: 11.8)
-            NSGradient(colors: [light.withAlphaComponent(0.55), light.withAlphaComponent(0)])!
-                .draw(fromCenter: c, radius: 0, toCenter: c, radius: 6.2, options: [])
+        if look == .lit {
+            // Glow and light rays around the lantern. The lamp shrinks a little
+            // (around the base) so the rays fit in the 18pt icon.
+            let scale: CGFloat = 0.9
+            let c = NSPoint(x: 9, y: 11.8 * scale)
+            NSGradient(colors: [light.withAlphaComponent(0.6), light.withAlphaComponent(0)])!
+                .draw(fromCenter: c, radius: 0, toCenter: c, radius: 6.5, options: [])
+            light.setStroke()
+            for degrees in [0.0, 180.0, 40.0, 140.0] {
+                let r = degrees * .pi / 180
+                let ray = NSBezierPath()
+                ray.lineWidth = 1.4; ray.lineCapStyle = .round
+                ray.move(to: NSPoint(x: c.x + cos(r) * 4.8, y: c.y + sin(r) * 4.8))
+                ray.line(to: NSPoint(x: c.x + cos(r) * 7.8, y: c.y + sin(r) * 7.8))
+                ray.stroke()
+            }
+            let t = NSAffineTransform()
+            t.translateX(by: 9, yBy: 0); t.scale(by: scale); t.translateX(by: -9, yBy: 0)
+            t.concat()
         }
 
         ink.setFill()

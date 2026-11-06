@@ -82,6 +82,19 @@ Passage.app ──(Unix socket, your user only)──▶ passage-helper (root, l
 - Passwords and pre-shared keys are stored in your login Keychain. While connected, they are also in root-only files under `/var/run/passage`, which are deleted when you disconnect.
 - Logs: `/var/log/passage/` (Settings → Logs).
 
+## Testing
+
+`scripts/check-state.sh` checks what Passage has left on the system, with no root needed:
+
+```bash
+scripts/check-state.sh installed       # helper installed and answering
+scripts/check-state.sh connected full  # tunnel, routes and DNS in place (or: split)
+scripts/check-state.sh disconnected    # nothing left behind after disconnecting
+scripts/check-state.sh uninstalled     # helper fully removed
+```
+
+The app icon is drawn by `scripts/make-icon.swift`. Run `swift scripts/make-icon.swift` to regenerate `Resources/AppIcon.icns`.
+
 ## Security notes
 
 - The helper runs strongSwan from your Homebrew prefix. Homebrew's files are writable by your user, so anything running as you could change what the helper runs as root. This is the same trust you already give Homebrew, but it's a real limitation. Bundling a root-owned strongSwan is planned.

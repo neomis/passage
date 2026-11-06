@@ -15,6 +15,13 @@ struct PassageApp: App {
 
         Window("Passage Settings", id: "settings") {
             SettingsView(store: store, vpn: vpn)
+                // Passage is menu-bar-only, which hides it from the Dock and Cmd-Tab.
+                // Act like a normal app while Settings is open so the window can be found.
+                .onAppear {
+                    NSApp.setActivationPolicy(.regular)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .onDisappear { NSApp.setActivationPolicy(.accessory) }
         }
         .defaultSize(width: 820, height: 620)
     }

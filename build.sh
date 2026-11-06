@@ -18,6 +18,7 @@ swiftc -O -swift-version 5 -parse-as-library \
 
 cp Helper/passage-helper Helper/install-helper.sh Helper/uninstall-helper.sh "$APP/Contents/Resources/"
 chmod 755 "$APP/Contents/Resources/"*
+cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -28,6 +29,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>Passage</string>
   <key>CFBundleIdentifier</key><string>io.github.neomis.passage</string>
   <key>CFBundleExecutable</key><string>Passage</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>

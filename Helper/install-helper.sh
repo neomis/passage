@@ -26,6 +26,8 @@ install -o root -g wheel -m 755 "$SRC_DIR/passage-helper" "$HELPER_DST"
 rm -rf "$SS_DST"
 install -d -o root -g wheel -m 755 "$SS_DST"
 install -o root -g wheel -m 755 "$SRC_DIR/strongswan/charon" "$SRC_DIR/strongswan/swanctl" "$SS_DST/"
+# A downloaded app carries the quarantine mark; the installed copies are trusted by the admin prompt.
+xattr -cr "$HELPER_DST" "$SS_DST" 2>/dev/null || true
 install -d -o root -g wheel -m 755 /var/log/passage
 
 cat > "$PLIST" <<EOF

@@ -24,10 +24,22 @@ Not supported yet: certificate (TLS) authentication for the user or machine, IPv
 
 ## Requirements
 
-- macOS 14 or later (tested on macOS 27, Apple silicon)
-- Nothing else to run it. Passage includes its own strongSwan.
+- macOS 14 or later, Apple silicon (Intel builds aren't available yet; building from source on Intel should work but is untested)
+- Nothing else. Passage includes its own strongSwan.
 
 ## Install
+
+### Homebrew
+
+```bash
+brew install --cask neomis/tap/passage
+```
+
+### Download
+
+Get `Passage-<version>-arm64.zip` from [Releases](https://github.com/neomis/passage/releases), unzip it, and move **Passage** to Applications.
+
+Passage isn't notarized by Apple yet, so macOS blocks the first launch. Open **System Settings → Privacy & Security** and click **Open Anyway** next to the message about Passage.
 
 ### Build from source
 
@@ -41,9 +53,9 @@ This needs the Xcode Command Line Tools (`xcode-select --install`) and pkg-confi
 
 Optional: `scripts/make-signing-cert.sh` creates a local signing certificate, which `build.sh` then uses, so every build you make has the same signing identity. Builds are ad-hoc signed without it.
 
-Open **Passage** from Applications. Click the shield in the menu bar and choose **Install Helper…** (one administrator prompt). Then open **Settings…**, add a connection, and connect.
+### First run
 
-The app isn't notarized yet. If you download a build instead of compiling it, macOS will block the first launch: open **System Settings → Privacy & Security** and click **Open Anyway**.
+Open **Passage** from Applications. Click the lamp in the menu bar and choose **Install Helper…** (one administrator prompt). Then open **Settings…**, add a connection, and connect.
 
 ## Setting up a connection
 

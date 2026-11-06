@@ -32,8 +32,11 @@ Not supported yet: certificate (TLS) authentication for the user or machine, IPv
 ### Homebrew
 
 ```bash
+brew trust neomis/tap
 brew install --cask neomis/tap/passage
 ```
+
+Homebrew 7 and later asks you to trust a third-party tap before installing from it.
 
 ### Download
 

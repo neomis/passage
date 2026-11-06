@@ -7,6 +7,7 @@ set -euo pipefail
 
 LABEL="io.github.neomis.passage.helper"
 HELPER_DST="/Library/PrivilegedHelperTools/$LABEL"
+SS_DST="/Library/PrivilegedHelperTools/$LABEL.strongswan"   # Passage's own strongSwan
 PLIST="/Library/LaunchDaemons/$LABEL.plist"
 SOCKET="/var/run/passage.sock"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,6 +22,10 @@ rm -f "$SOCKET"
 
 install -d -o root -g wheel -m 755 /Library/PrivilegedHelperTools
 install -o root -g wheel -m 755 "$SRC_DIR/passage-helper" "$HELPER_DST"
+# The helper runs these as root, so they must be root-owned and not writable by anyone else.
+rm -rf "$SS_DST"
+install -d -o root -g wheel -m 755 "$SS_DST"
+install -o root -g wheel -m 755 "$SRC_DIR/strongswan/charon" "$SRC_DIR/strongswan/swanctl" "$SS_DST/"
 install -d -o root -g wheel -m 755 /var/log/passage
 
 cat > "$PLIST" <<EOF
@@ -60,6 +65,7 @@ if [[ "$owner" != "$USER_ID" || "$mode" != "600" ]]; then
   echo "error: socket has owner $owner mode $mode (expected $USER_ID, 600); uninstalling" >&2
   launchctl bootout "system/$LABEL" 2>/dev/null || true
   rm -f "$PLIST" "$HELPER_DST" "$SOCKET"
+  rm -rf "$SS_DST"
   exit 1
 fi
 echo "Passage helper installed"

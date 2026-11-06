@@ -6,7 +6,7 @@ import LocalAuthentication
 /// Talks to the privileged helper over its Unix socket.
 enum HelperClient {
     static let socketPath = "/var/run/passage.sock"
-    static let expectedVersion = "4"
+    static let expectedVersion = "6"
 
     struct Failure: Error { let message: String }
 

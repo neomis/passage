@@ -12,12 +12,13 @@
 LABEL=io.github.neomis.passage.helper
 HELPER=/Library/PrivilegedHelperTools/$LABEL
 PLIST=/Library/LaunchDaemons/$LABEL.plist
+SS_DIR=/Library/PrivilegedHelperTools/$LABEL.strongswan
 SOCK=/var/run/passage.sock
 STATUS=/var/run/passage.status
 RUN_DIR=/var/run/passage
 LOCK_DIR=/var/run/passage.lock
 SC_KEY=State:/Network/Service/passage
-EXPECTED_VERSION=4
+EXPECTED_VERSION="$(sed -n "s/^HELPER_VERSION=//p" "$(dirname "$0")/../Helper/passage-helper")"
 
 failures=0
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
@@ -28,7 +29,13 @@ check_not() { local desc="$1"; shift; if "$@" >/dev/null 2>&1; then fail "$desc"
 
 status_value() { sed -n "s/^$1=//p" "$STATUS" 2>/dev/null; }
 sc_has() { printf 'show %s\n' "$1" | scutil | grep -qv 'No such key'; }
-charon_running() { pgrep -f 'libexec/ipsec/charon' ; }
+charon_running() { pgrep -f "$SS_DIR/charon|libexec/ipsec/charon"; }
+ss_root_owned() {
+  for f in "$SS_DIR" "$SS_DIR/charon" "$SS_DIR/swanctl"; do
+    [[ -e "$f" && "$(stat -f '%u' "$f")" == 0 ]] || return 1
+    [[ $(( 0$(stat -f '%Lp' "$f") & 022 )) == 0 ]] || return 1
+  done
+}
 pppd_running() { pgrep -f "pppd file $RUN_DIR/ppp.options"; }
 helper_version() { printf 'cmd=version\n\n' | nc -U -w 5 "$SOCK" 2>/dev/null | sed -n 's/^ok: //p'; }
 route_via() { netstat -rn -f inet | awk -v d="$1" -v i="$2" '$1 == d && $NF == i { found = 1 } END { exit !found }'; }
@@ -42,6 +49,7 @@ check_installed() {
   echo "Helper installed"
   check "helper binary at $HELPER" test -x "$HELPER"
   check "launchd plist at $PLIST" test -f "$PLIST"
+  check "bundled strongSwan in $SS_DIR, root-owned, not writable by others" ss_root_owned
   check "launchd service loaded" launchctl print "system/$LABEL"
   check "socket $SOCK is yours with mode 600" socket_ok
   local v; v="$(helper_version)"
@@ -53,6 +61,7 @@ check_uninstalled() {
   echo "Helper removed"
   check_not "no helper binary" test -e "$HELPER"
   check_not "no launchd plist" test -e "$PLIST"
+  check_not "no bundled strongSwan left" test -e "$SS_DIR"
   check_not "launchd service not loaded" launchctl print "system/$LABEL"
   check_not "no socket" test -e "$SOCK"
   check_disconnected

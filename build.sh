@@ -9,7 +9,7 @@ VERSION="$(cat VERSION)"
 ARCH="$(uname -m)"
 APP="build/Passage.app"
 
-rm -rf build
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O -swift-version 5 -parse-as-library \
@@ -18,6 +18,11 @@ swiftc -O -swift-version 5 -parse-as-library \
 
 cp Helper/passage-helper Helper/install-helper.sh Helper/uninstall-helper.sh "$APP/Contents/Resources/"
 chmod 755 "$APP/Contents/Resources/"*
+
+# Passage's own strongSwan (built once, then cached in build/strongswan)
+scripts/build-strongswan.sh
+mkdir -p "$APP/Contents/Resources/strongswan"
+cp build/strongswan/charon build/strongswan/swanctl "$APP/Contents/Resources/strongswan/"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<EOF
@@ -45,9 +50,11 @@ EOF
 # Keychain items across rebuilds. Create one with scripts/make-signing-cert.sh.
 IDENTITY="${PASSAGE_SIGN_IDENTITY:-Passage Local Signing}"
 if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+  codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/strongswan/"*
   codesign --force --deep --sign "$IDENTITY" "$APP"
   SIGNED_WITH="$IDENTITY"
 else
+  codesign --force --sign - "$APP/Contents/Resources/strongswan/"*
   codesign --force --deep --sign - "$APP"
   SIGNED_WITH="ad-hoc (run scripts/make-signing-cert.sh to stop repeated Keychain prompts)"
 fi

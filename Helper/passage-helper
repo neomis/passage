@@ -20,7 +20,7 @@ set -uo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 umask 022
 
-HELPER_VERSION=4
+HELPER_VERSION=6
 
 RUN_DIR=/var/run/passage                 # root-only, holds secrets while connected
 STATUS_FILE=/var/run/passage.status      # world-readable, no secrets
@@ -29,12 +29,10 @@ LOG_DIR=/var/log/passage
 SC_KEY=State:/Network/Service/passage
 L2TP_PLUGIN=/System/Library/SystemConfiguration/PPPController.bundle/Contents/PlugIns/L2TP.ppp
 
-BREW=""
-for p in /opt/homebrew /usr/local; do
-  [[ -x "$p/opt/strongswan/libexec/ipsec/charon" ]] && { BREW="$p"; break; }
-done
-CHARON="$BREW/opt/strongswan/libexec/ipsec/charon"
-SWANCTL="$BREW/opt/strongswan/bin/swanctl"
+# Passage's own strongSwan, installed root-owned next to the helper (see install-helper.sh).
+SS_DIR=/Library/PrivilegedHelperTools/io.github.neomis.passage.helper.strongswan
+CHARON="$SS_DIR/charon"
+SWANCTL="$SS_DIR/swanctl"
 # Passage's own strongSwan control socket, so leftovers from other strongSwan
 # setups in /var/run can't block it.
 VICI_URI="unix://$RUN_DIR/charon.vici"
@@ -151,7 +149,7 @@ do_down() {
   fi
   printf 'remove %s/IPv4\nremove %s/DNS\n' "$SC_KEY" "$SC_KEY" | scutil >/dev/null 2>&1 || true
 
-  if [[ -n "$BREW" ]]; then
+  if [[ -x "$SWANCTL" ]]; then
     sw --terminate --ike passage --force >/dev/null 2>&1 || true
   fi
   if [[ -f "$RUN_DIR/charon.pid" ]]; then kill "$(cat "$RUN_DIR/charon.pid")" 2>/dev/null || true; fi
@@ -185,7 +183,7 @@ do_up() {
   [[ -n "$R_password" ]] || fail "missing password"
   [[ -d "$L2TP_PLUGIN" ]] || fail "macOS L2TP plugin not found"
   if [[ "$R_ipsec" == 1 ]]; then
-    [[ -n "$BREW" ]] || fail "strongSwan not found. Install it with: brew install strongswan"
+    [[ -x "$CHARON" && -x "$SWANCTL" ]] || fail "Passage's strongSwan is missing. Reinstall the helper from the Passage menu."
     [[ -n "$R_psk" ]] || fail "missing IPsec pre-shared key"
   fi
   is_connected && fail "already connected"
@@ -229,15 +227,10 @@ do_up() {
 
     cat > "$RUN_DIR/strongswan.conf" <<EOF
 charon {
-  load_modular = yes
   install_routes = no
   plugins {
-    include $BREW/etc/strongswan.d/charon/*.conf
     vici {
       socket = $VICI_URI
-    }
-    stroke {
-      load = no
     }
   }
   filelog {
@@ -251,7 +244,6 @@ charon {
     }
   }
 }
-include $BREW/etc/strongswan.d/*.conf
 EOF
 
     cat > "$RUN_DIR/swanctl.conf" <<EOF

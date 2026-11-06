@@ -4,7 +4,7 @@ A macOS menu bar app for **L2TP/IPsec VPNs that the built-in macOS VPN can't con
 
 The built-in macOS L2TP client doesn't let you choose IPsec algorithms. Linux users solve this with NetworkManager-l2tp's advanced IPsec options. Passage brings the same options to the Mac:
 
-- **strongSwan** (from Homebrew) handles IPsec, using exactly the algorithms you configure
+- **strongSwan**, bundled with the app, handles IPsec, using exactly the algorithms you configure
 - macOS's own **pppd + L2TP plugin** handles L2TP and the login
 - a small **privileged helper** applies the network changes, so connecting never asks for your password
 
@@ -25,7 +25,7 @@ Not supported yet: certificate (TLS) authentication for the user or machine, IPv
 ## Requirements
 
 - macOS 14 or later (tested on macOS 27, Apple silicon)
-- [Homebrew](https://brew.sh) and strongSwan: `brew install strongswan`
+- Nothing else to run it. Passage includes its own strongSwan.
 
 ## Install
 
@@ -37,7 +37,7 @@ cd passage
 ./build.sh --install
 ```
 
-This needs only the Xcode Command Line Tools (`xcode-select --install`).
+This needs the Xcode Command Line Tools (`xcode-select --install`) and pkg-config (`brew install pkgconf`). The first build also downloads and compiles strongSwan and OpenSSL, which takes about a minute (`scripts/build-strongswan.sh`, with pinned checksums). Later builds reuse that.
 
 If you'll rebuild often, first run `scripts/make-signing-cert.sh`. It creates a local signing certificate that `build.sh` then uses. Without it, every build looks like a new app to macOS, which forgets "Always Allow" and asks for your password again before Passage can read its saved secrets.
 
@@ -99,7 +99,7 @@ The app icon is drawn by `scripts/make-icon.swift`. Run `swift scripts/make-icon
 
 ## Security notes
 
-- The helper runs strongSwan from your Homebrew prefix. Homebrew's files are writable by your user, so anything running as you could change what the helper runs as root. This is the same trust you already give Homebrew, but it's a real limitation. Bundling a root-owned strongSwan is planned.
+- Passage bundles strongSwan 6.1.0 with OpenSSL 3.5 (LTS), built with only the features it uses. Installing the helper copies it to `/Library/PrivilegedHelperTools/io.github.neomis.passage.helper.strongswan`, owned by root, so nothing running as your user can change what the helper runs as root.
 - L2TP/IPsec with a pre-shared key and SHA1 is an old protocol. Use Passage when it's what your network requires, not as a first choice.
 
 ## Uninstall

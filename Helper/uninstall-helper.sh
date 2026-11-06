@@ -15,5 +15,6 @@ fi
 launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist" "/Library/PrivilegedHelperTools/$LABEL" "$SOCKET"
 rm -rf "/Library/PrivilegedHelperTools/$LABEL.strongswan"
+rm -rf "/Library/Application Support/$LABEL"   # saved passwords and pre-shared keys
 rm -rf /var/log/passage /var/run/passage /var/run/passage.status /var/run/passage.lock
 echo "Passage helper removed"

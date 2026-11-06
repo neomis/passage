@@ -42,8 +42,7 @@ struct MenuPanel: View {
         HStack(spacing: 12) {
             ZStack {
                 Circle().fill(statusColor.opacity(0.18)).frame(width: 44, height: 44)
-                Image(systemName: statusSymbol)
-                    .font(.system(size: 20, weight: .semibold))
+                LampSymbol(look: lampLook, size: 30)
                     .foregroundStyle(statusColor)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -136,11 +135,11 @@ struct MenuPanel: View {
         }
     }
 
-    private var statusSymbol: String {
+    private var lampLook: LampIcon.Look {
         switch vpn.state {
-        case .connected: "lock.shield.fill"
-        case .connecting, .disconnecting: "arrow.triangle.2.circlepath"
-        case .disconnected: "shield.slash"
+        case .connected: .lit
+        case .connecting, .disconnecting: .dim
+        case .disconnected: .off
         }
     }
 
@@ -181,6 +180,19 @@ struct MenuBarIcon: View {
         case .connecting, .disconnecting: Image(nsImage: LampIcon.image(.dim))
         case .disconnected: Image(nsImage: LampIcon.image(.off))
         }
+    }
+}
+
+/// The lamp at any size. Off and dim follow the view's foreground color.
+struct LampSymbol: View {
+    let look: LampIcon.Look
+    let size: CGFloat
+    var body: some View {
+        Image(nsImage: LampIcon.image(look))
+            .renderingMode(look == .lit ? .original : .template)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
     }
 }
 

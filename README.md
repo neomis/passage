@@ -12,7 +12,7 @@ The built-in macOS L2TP client doesn't let you choose IPsec algorithms. Linux us
 
 - Menu bar status, connect/disconnect, connection timer
 - Multiple connections, each with the same options as NetworkManager-l2tp:
-  - **General:** gateway, username, password (saved in Keychain or asked each time), NT domain
+  - **General:** gateway, username, password (saved or asked each time), NT domain
   - **IPsec:** pre-shared key, remote/local ID, phase 1 and 2 algorithms and lifetimes, legacy proposals, enforce UDP encapsulation, IP compression, disable PFS
   - **PPP:** allowed auth methods (PAP, CHAP, MSCHAP, MSCHAPv2, EAP), MPPE, BSD/Deflate/TCP header/protocol field/address-control compression, echo packets, MTU/MRU
   - **IPv4:** send all traffic or split tunnel with routes, DNS servers, search domains
@@ -39,7 +39,7 @@ cd passage
 
 This needs the Xcode Command Line Tools (`xcode-select --install`) and pkg-config (`brew install pkgconf`). The first build also downloads and compiles strongSwan and OpenSSL, which takes about a minute (`scripts/build-strongswan.sh`, with pinned checksums). Later builds reuse that.
 
-If you'll rebuild often, first run `scripts/make-signing-cert.sh`. It creates a local signing certificate that `build.sh` then uses. Without it, every build looks like a new app to macOS, which forgets "Always Allow" and asks for your password again before Passage can read its saved secrets.
+Optional: `scripts/make-signing-cert.sh` creates a local signing certificate, which `build.sh` then uses, so every build you make has the same signing identity. Builds are ad-hoc signed without it.
 
 Open **Passage** from Applications. Click the shield in the menu bar and choose **Install Helper…** (one administrator prompt). Then open **Settings…**, add a connection, and connect.
 
@@ -81,7 +81,10 @@ Passage.app ──(Unix socket, your user only)──▶ passage-helper (root, l
 - The helper is installed at `/Library/PrivilegedHelperTools/io.github.neomis.passage.helper` and started on demand by launchd (`/Library/LaunchDaemons/io.github.neomis.passage.helper.plist`).
 - Its socket, `/var/run/passage.sock`, is owned by the installing user with mode `0600`, so only that user can send it commands.
 - Every value the app sends is checked against a strict pattern before it reaches a config file.
-- Passwords and pre-shared keys are stored in your login Keychain. While connected, they are also in root-only files under `/var/run/passage`, which are deleted when you disconnect.
+- Passwords and pre-shared keys are kept by the helper in root-only files under `/Library/Application Support/io.github.neomis.passage.helper/secrets`, as Linux NetworkManager does. The app hands a secret over when you save it and never reads it back.
+- Each saved secret is tied to the gateway and username it was saved with, and the helper only uses it for that server. Change either and Passage asks for the password again. This keeps other programs running as you from sending your password to a different server through the helper.
+- Why not the Keychain: for apps without an Apple developer Team ID, macOS ties Keychain access to each exact build, so every update would ask for your password again.
+- While connected, the secrets are also in root-only files under `/var/run/passage`, which are deleted when you disconnect.
 - Logs: `/var/log/passage/` (Settings → Logs).
 
 ## Testing
@@ -110,7 +113,7 @@ In Settings, use the helper menu (bottom left) → **Remove Helper…**, then de
 rm -rf ~/Library/Application\ Support/Passage
 ```
 
-Saved passwords are Keychain items named "Passage VPN".
+Removing the helper also deletes the saved passwords and pre-shared keys.
 
 ## License
 

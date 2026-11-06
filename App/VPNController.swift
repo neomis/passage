@@ -6,7 +6,7 @@ import LocalAuthentication
 /// Talks to the privileged helper over its Unix socket.
 enum HelperClient {
     static let socketPath = "/var/run/passage.sock"
-    static let expectedVersion = "6"
+    static let expectedVersion = "7"
 
     struct Failure: Error { let message: String }
 
@@ -168,19 +168,20 @@ final class VPNController: ObservableObject {
 
     private func startConnect(_ profile: Profile) {
 
-        var password = Keychain.get(profile.id, .password)
-        if profile.askPasswordEachTime || password.isEmpty {
+        // Saved secrets stay with the helper; the app only sends a password you type now.
+        let saved = Secrets.status(profile)
+        var password = ""
+        if profile.askPasswordEachTime || !saved.password {
             guard let p = Self.askPassword(for: profile) else { return }
             password = p
         }
-        let psk = Keychain.get(profile.id, .psk)
-        if profile.ipsecEnabled && psk.isEmpty {
+        if profile.ipsecEnabled && !saved.psk {
             lastError = "Add the IPsec pre-shared key in Settings"; return
         }
 
         state = .connecting
         progress = "Starting…"
-        let request = profile.helperRequest(password: password, psk: psk)
+        let request = profile.helperRequest(password: password, psk: "")
         Task.detached {
             do {
                 _ = try HelperClient.send(request) { line in

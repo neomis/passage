@@ -10,6 +10,10 @@ struct PassageApp: App {
             MenuPanel(store: store, vpn: vpn)
         } label: {
             MenuBarIcon(vpn: vpn)
+                .onChange(of: vpn.helper) { _, state in
+                    if state == .ready { Secrets.migrateFromKeychain(store.profiles) }
+                }
+                .task { if vpn.helper == .ready { Secrets.migrateFromKeychain(store.profiles) } }
         }
         .menuBarExtraStyle(.window)
 

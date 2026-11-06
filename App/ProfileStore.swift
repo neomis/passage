@@ -1,7 +1,6 @@
 import Foundation
-import Security
 
-/// Saves profiles as JSON in Application Support and secrets in the Keychain.
+/// Saves profiles as JSON in Application Support. Secrets are kept by the helper (see Secrets).
 @MainActor
 final class ProfileStore: ObservableObject {
     @Published private(set) var profiles: [Profile] = []
@@ -44,8 +43,7 @@ final class ProfileStore: ObservableObject {
         p.id = UUID().uuidString
         p.name += " copy"
         profiles.append(p)
-        Keychain.set(Keychain.get(oldID, .password), for: p.id, .password)
-        Keychain.set(Keychain.get(oldID, .psk), for: p.id, .psk)
+        Secrets.copy(from: oldID, to: p.id)
         save()
         return p
     }
@@ -57,8 +55,7 @@ final class ProfileStore: ObservableObject {
 
     func delete(_ id: String) {
         profiles.removeAll { $0.id == id }
-        Keychain.delete(id, .password)
-        Keychain.delete(id, .psk)
+        Secrets.delete(id)
         if selectedID == id { selectedID = profiles.first?.id ?? "" }
         save()
     }
@@ -83,50 +80,5 @@ final class ProfileStore: ObservableObject {
         if let data = try? enc.encode(profiles) {
             try? data.write(to: fileURL, options: .atomic)
         }
-    }
-}
-
-/// Generic-password Keychain items, one per profile and secret.
-enum Keychain {
-    enum Secret: String { case password, psk }
-    private static let service = "Passage"
-
-    private static func query(_ id: String, _ s: Secret) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: "\(id).\(s.rawValue)"]
-    }
-
-    static func get(_ id: String, _ s: Secret) -> String {
-        var q = query(id, s)
-        q[kSecReturnData as String] = true
-        q[kSecMatchLimit as String] = kSecMatchLimitOne
-        var out: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let d = out as? Data else { return "" }
-        return String(decoding: d, as: UTF8.self)
-    }
-
-    /// Whether a secret is saved, without reading it (so macOS doesn't ask for permission).
-    static func exists(_ id: String, _ s: Secret) -> Bool {
-        var q = query(id, s)
-        q[kSecReturnAttributes as String] = true
-        q[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
-    }
-
-    static func set(_ value: String, for id: String, _ s: Secret) {
-        if value.isEmpty { delete(id, s); return }
-        let data = Data(value.utf8)
-        let q = query(id, s)
-        if SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary) == errSecItemNotFound {
-            var add = q
-            add[kSecValueData as String] = data
-            add[kSecAttrLabel as String] = "Passage VPN (\(s.rawValue))"
-            SecItemAdd(add as CFDictionary, nil)
-        }
-    }
-
-    static func delete(_ id: String, _ s: Secret) {
-        SecItemDelete(query(id, s) as CFDictionary)
     }
 }

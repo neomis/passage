@@ -12,6 +12,7 @@
 #   cmd=status                       -> ok: connected <id> <ifname> <ip> <since> | ok: disconnected
 #   cmd=down                         -> ok: disconnected
 #   cmd=up + connection settings     -> ok: connected <ifname> <ip>
+#   cmd=secrets-set|secrets-status|secrets-copy|secrets-delete  (see "Saved secrets")
 #
 # Every value is validated against a strict pattern before it is used, because
 # it ends up in config files that root programs (pppd, strongSwan) read.
@@ -20,12 +21,14 @@ set -uo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 umask 022
 
-HELPER_VERSION=6
+HELPER_VERSION=7
 
 RUN_DIR=/var/run/passage                 # root-only, holds secrets while connected
 STATUS_FILE=/var/run/passage.status      # world-readable, no secrets
 LOCK_DIR=/var/run/passage.lock
 LOG_DIR=/var/log/passage
+# Saved passwords and pre-shared keys: one root-only file per connection.
+SECRETS_DIR="/Library/Application Support/io.github.neomis.passage.helper/secrets"
 SC_KEY=State:/Network/Service/passage
 L2TP_PLUGIN=/System/Library/SystemConfiguration/PPPController.bundle/Contents/PlugIns/L2TP.ppp
 
@@ -63,15 +66,15 @@ valid_text() { # printable, single line, not too long
 validate() { # validate <key> <value>
   local k="$1" v="$2"
   case "$k" in
-    cmd)              [[ "$v" =~ ^(up|down|status|version)$ ]] ;;
-    id)               [[ "$v" =~ $RE_ID ]] ;;
+    cmd)              [[ "$v" =~ ^(up|down|status|version|secrets-set|secrets-status|secrets-copy|secrets-delete)$ ]] ;;
+    id|from)          [[ "$v" =~ $RE_ID ]] ;;
     gateway)          [[ "$v" =~ $RE_HOST ]] ;;
     username|password|psk|nt_domain) valid_text "$v" ;;
     remote_id|local_id) [[ "$v" =~ $RE_IKEID ]] ;;
     ike|esp)          [[ ${#v} -le 512 && "$v" =~ $RE_ALGS ]] ;;
     ike_lifetime|sa_lifetime|mtu|mru) [[ "$v" =~ $RE_NUM ]] ;;
     ipsec|legacy|forceencaps|ipcomp|pfs|refuse_pap|refuse_chap|refuse_mschap|refuse_mschapv2|refuse_eap|\
-    mppe|mppe128|mppe_stateful|bsdcomp|deflate|vj|pcomp|accomp|echo|default_route|ignore_auto_dns)
+    mppe|mppe128|mppe_stateful|bsdcomp|deflate|vj|pcomp|accomp|echo|default_route|ignore_auto_dns|forget_password)
                       [[ "$v" =~ $RE_BOOL ]] ;;
     routes)           [[ "$v" =~ $RE_CIDRLIST ]] ;;
     dns)              [[ "$v" =~ $RE_IPLIST ]] ;;
@@ -81,7 +84,7 @@ validate() { # validate <key> <value>
 }
 
 # Defaults for everything optional.
-R_cmd=""; R_id=""; R_gateway=""; R_username=""; R_password=""; R_psk=""; R_nt_domain=""
+R_cmd=""; R_id=""; R_from=""; R_forget_password=0; R_gateway=""; R_username=""; R_password=""; R_psk=""; R_nt_domain=""
 R_remote_id=""; R_local_id=""; R_ike=""; R_esp=""; R_ike_lifetime=10800; R_sa_lifetime=3600
 R_ipsec=1; R_legacy=0; R_forceencaps=0; R_ipcomp=0; R_pfs=1
 R_refuse_pap=0; R_refuse_chap=0; R_refuse_mschap=0; R_refuse_mschapv2=0; R_refuse_eap=0
@@ -165,6 +168,76 @@ do_down() {
 
 fail() { do_down; reply "error: $*"; exit 0; }
 
+# --- saved secrets -------------------------------------------------------------
+#
+# The app hands secrets to the helper when you save a connection and never reads
+# them back. Each file records the gateway and username the secrets were saved
+# with, and a secret is only used (or reported as saved) while those still match:
+# the password needs the same gateway and username, the pre-shared key the same
+# gateway. So another program running as you can't make the helper send your
+# password to a different server.
+#
+#   cmd=secrets-set id gateway username [password] [psk] [forget_password=1]
+#       Saves the secrets given. One not given is kept if its binding still
+#       matches, otherwise dropped.                -> ok: password=0|1 psk=0|1
+#   cmd=secrets-status id gateway username         -> ok: password=0|1 psk=0|1
+#   cmd=secrets-copy id from                       -> ok: copied | ok: nothing to copy
+#   cmd=secrets-delete id                          -> ok: deleted
+
+secret_file() { printf '%s/%s' "$SECRETS_DIR" "$1"; }
+secret_get() { # secret_get <id> <key>
+  local f; f="$(secret_file "$1")"
+  [[ -f "$f" ]] && awk -v k="$2" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$f"
+}
+# Prints the saved password / psk if their bindings match, else nothing.
+saved_password() { # <id> <gateway> <username>
+  [[ "$(secret_get "$1" gateway)" == "$2" && "$(secret_get "$1" username)" == "$3" ]] && secret_get "$1" password
+}
+saved_psk() { # <id> <gateway>
+  [[ "$(secret_get "$1" gateway)" == "$2" ]] && secret_get "$1" psk
+}
+secrets_summary() { # <password> <psk>
+  local pw=0 psk=0
+  [[ -n "$1" ]] && pw=1
+  [[ -n "$2" ]] && psk=1
+  echo "password=$pw psk=$psk"
+}
+
+do_secrets() {
+  [[ -n "$R_id" ]] || { reply "error: missing id"; return; }
+  local f pw psk
+  f="$(secret_file "$R_id")"
+  case "$R_cmd" in
+    secrets-set|secrets-status)
+      [[ -n "$R_gateway" && -n "$R_username" ]] || { reply "error: missing gateway or username"; return; }
+      pw="$(saved_password "$R_id" "$R_gateway" "$R_username")"
+      psk="$(saved_psk "$R_id" "$R_gateway")"
+      if [[ "$R_cmd" == secrets-status ]]; then reply "ok: $(secrets_summary "$pw" "$psk")"; return; fi
+      [[ -n "$R_password" ]] && pw="$R_password"
+      [[ "$R_forget_password" == 1 ]] && pw=""
+      [[ -n "$R_psk" ]] && psk="$R_psk"
+      if [[ -z "$pw" && -z "$psk" ]]; then
+        rm -f "$f"
+      else
+        install -d -o root -g wheel -m 700 "$SECRETS_DIR"
+        ( umask 077
+          printf 'gateway=%s\nusername=%s\npassword=%s\npsk=%s\n' "$R_gateway" "$R_username" "$pw" "$psk" > "$f.tmp" )
+        mv -f "$f.tmp" "$f"
+      fi
+      reply "ok: $(secrets_summary "$pw" "$psk")" ;;
+    secrets-copy)
+      [[ -n "$R_from" ]] || { reply "error: missing from"; return; }
+      if [[ -f "$(secret_file "$R_from")" ]]; then
+        ( umask 077; cp "$(secret_file "$R_from")" "$f.tmp" ) && mv -f "$f.tmp" "$f"
+        reply "ok: copied"
+      else
+        reply "ok: nothing to copy"
+      fi ;;
+    secrets-delete)
+      rm -f "$f"; reply "ok: deleted" ;;
+  esac
+}
+
 # Add a Diffie-Hellman group to ESP proposals that lack one (for PFS).
 add_pfs_group() { # add_pfs_group <esp proposals> <ike proposals>
   local esp="$1" ike="$2" dh out="" p
@@ -180,11 +253,14 @@ add_pfs_group() { # add_pfs_group <esp proposals> <ike proposals>
 
 do_up() {
   [[ -n "$R_id" && -n "$R_gateway" && -n "$R_username" ]] || fail "missing id, gateway or username"
-  [[ -n "$R_password" ]] || fail "missing password"
+  # Secrets not sent by the app come from the saved ones (see "Saved secrets").
+  [[ -n "$R_password" ]] || R_password="$(saved_password "$R_id" "$R_gateway" "$R_username")"
+  [[ -n "$R_psk" || "$R_ipsec" != 1 ]] || R_psk="$(saved_psk "$R_id" "$R_gateway")"
+  [[ -n "$R_password" ]] || fail "No saved password for this connection. Enter it in Settings."
   [[ -d "$L2TP_PLUGIN" ]] || fail "macOS L2TP plugin not found"
   if [[ "$R_ipsec" == 1 ]]; then
     [[ -x "$CHARON" && -x "$SWANCTL" ]] || fail "Passage's strongSwan is missing. Reinstall the helper from the Passage menu."
-    [[ -n "$R_psk" ]] || fail "missing IPsec pre-shared key"
+    [[ -n "$R_psk" ]] || fail "No saved pre-shared key for this connection. Enter it in Settings."
   fi
   is_connected && fail "already connected"
 
@@ -424,6 +500,10 @@ case "$R_cmd" in
 esac
 
 [[ $EUID -eq 0 ]] || { reply "error: the helper must run as root"; exit 0; }
+
+case "$R_cmd" in
+  secrets-*) do_secrets; exit 0 ;;
+esac
 
 # up/down change system state: one at a time.
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then

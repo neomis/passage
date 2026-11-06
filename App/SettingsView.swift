@@ -11,33 +11,53 @@ final class ProfileEditor: ObservableObject {
     @Published var psk = ""
     @Published var tab = "general"
     @Published private(set) var original = Profile()
-    // Saved secrets are never read into the editor: reading them makes macOS ask for
-    // permission. The fields stay empty and only replace a secret when you type one.
-    @Published private(set) var hasSavedPassword = false
-    @Published private(set) var hasSavedPSK = false
+    // Saved secrets live with the helper and are never read back. The fields stay
+    // empty and only replace a secret when you type one.
+    @Published private(set) var saved = Secrets.Saved()
     @Published var saveMessage = ""
 
     weak var store: ProfileStore?
 
     var isDirty: Bool { draft != original || !password.isEmpty || !psk.isEmpty }
 
+    /// Saved secrets only apply to the gateway (and username) they were saved with.
+    var passwordPrompt: String {
+        if draft.gateway != original.gateway || draft.username != original.username, saved.password {
+            return "Enter again: gateway or username changed"
+        }
+        return saved.password ? "Saved – type to replace" : "Required"
+    }
+    var pskPrompt: String {
+        if draft.gateway != original.gateway, saved.psk { return "Enter again: gateway changed" }
+        return saved.psk ? "Saved – type to replace" : "Required"
+    }
+
     func load() {
         guard let id = selectedID, let p = store?.profile(id) else { return }
         draft = p; original = p
         password = ""; psk = ""
-        hasSavedPassword = Keychain.exists(id, .password)
-        hasSavedPSK = Keychain.exists(id, .psk)
+        saved = Secrets.status(p)
         saveMessage = ""
     }
 
     func save() {
         guard let store else { return }
         store.update(draft)
-        if draft.askPasswordEachTime { Keychain.delete(draft.id, .password) }
-        else if !password.isEmpty { Keychain.set(password, for: draft.id, .password) }
-        if !psk.isEmpty { Keychain.set(psk, for: draft.id, .psk) }
+        var message = "Saved"
+        // Always tell the helper, so it drops secrets that no longer match a changed
+        // gateway or username.
+        let typedSecret = !password.isEmpty || !psk.isEmpty
+        let hasTarget = !draft.gateway.isEmpty && !draft.username.isEmpty
+        if hasTarget || typedSecret {
+            do {
+                try Secrets.save(draft, password: draft.askPasswordEachTime ? nil : password, psk: psk,
+                                 forgetPassword: draft.askPasswordEachTime)
+            } catch let e as Secrets.Failure {
+                message = "Saved, but the password or key wasn't: \(e.message)"
+            } catch {}
+        }
         load()
-        saveMessage = "Saved"
+        saveMessage = message
     }
 }
 
@@ -51,14 +71,15 @@ struct SettingsView: View {
             List(selection: $editor.selectedID) {
                 ForEach(store.profiles) { p in
                     HStack {
-                        Image(systemName: vpn.connectedID == p.id ? "lock.shield.fill" : "shield")
-                            .foregroundStyle(vpn.connectedID == p.id ? .green : .secondary)
+                        LampSymbol(look: vpn.connectedID == p.id ? .lit : .off, size: 18)
+                            .foregroundStyle(.secondary)
                         Text(p.name)
                     }
                     .tag(Optional(p.id))
                 }
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .toolbar(removing: .sidebarToggle)   // the connection list is always needed
             .safeAreaInset(edge: .bottom) { listButtons }
         } detail: {
             if editor.selectedID != nil, store.profile(editor.selectedID ?? "") != nil {
@@ -142,8 +163,9 @@ struct ProfileForm: View {
                     Label(problem, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange).font(.callout).lineLimit(2)
                 } else if !editor.saveMessage.isEmpty && !editor.isDirty {
-                    Label(editor.saveMessage, systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green).font(.callout)
+                    let ok = editor.saveMessage == "Saved"
+                    Label(editor.saveMessage, systemImage: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(ok ? .green : .orange).font(.callout).lineLimit(2)
                 }
                 Spacer()
                 if vpn.connectedID == editor.draft.id && editor.isDirty {
@@ -173,7 +195,7 @@ private struct GeneralTab: View {
                 Toggle("Ask for password every time", isOn: $editor.draft.askPasswordEachTime)
                 if !editor.draft.askPasswordEachTime {
                     SecureField("Password", text: $editor.password,
-                                prompt: Text(editor.hasSavedPassword ? "Saved – type to replace" : "Required"))
+                                prompt: Text(editor.passwordPrompt))
                 }
                 TextField("NT domain", text: $editor.draft.ntDomain, prompt: Text("Optional"))
             }
@@ -199,7 +221,7 @@ private struct IPsecTab: View {
                 Section("Machine authentication") {
                     LabeledContent("Type") { Text("Pre-shared key") }
                     SecureField("Pre-shared key", text: $editor.psk,
-                                prompt: Text(editor.hasSavedPSK ? "Saved – type to replace" : "Required"))
+                                prompt: Text(editor.pskPrompt))
                     TextField("Remote ID", text: $editor.draft.remoteID, prompt: Text("Optional, e.g. the gateway's IP or FQDN"))
                     TextField("Local ID", text: $editor.draft.localID, prompt: Text("Optional"))
                 }

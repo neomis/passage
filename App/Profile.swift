@@ -2,7 +2,7 @@ import Foundation
 
 /// One VPN connection. Mirrors the options in NetworkManager-l2tp's editor
 /// (General, IPsec, PPP and IPv4 tabs). Secrets (password, pre-shared key)
-/// are not stored here; they live in the Keychain.
+/// are not stored here; the helper keeps them (see Secrets).
 struct Profile: Codable, Identifiable, Hashable {
     var id: String = UUID().uuidString
     var name: String = "New VPN"

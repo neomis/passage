@@ -41,8 +41,17 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-codesign --force --deep --sign - "$APP"
-echo "Built $APP ($VERSION, $ARCH)"
+# Sign with a stable identity if there is one, so macOS keeps "Always Allow" for
+# Keychain items across rebuilds. Create one with scripts/make-signing-cert.sh.
+IDENTITY="${PASSAGE_SIGN_IDENTITY:-Passage Local Signing}"
+if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+  codesign --force --deep --sign "$IDENTITY" "$APP"
+  SIGNED_WITH="$IDENTITY"
+else
+  codesign --force --deep --sign - "$APP"
+  SIGNED_WITH="ad-hoc (run scripts/make-signing-cert.sh to stop repeated Keychain prompts)"
+fi
+echo "Built $APP ($VERSION, $ARCH), signed: $SIGNED_WITH"
 
 if [[ "${1:-}" == "--install" ]]; then
   pkill -x Passage 2>/dev/null || true

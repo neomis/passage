@@ -39,6 +39,8 @@ cd passage
 
 This needs only the Xcode Command Line Tools (`xcode-select --install`).
 
+If you'll rebuild often, first run `scripts/make-signing-cert.sh`. It creates a local signing certificate that `build.sh` then uses. Without it, every build looks like a new app to macOS, which forgets "Always Allow" and asks for your password again before Passage can read its saved secrets.
+
 Open **Passage** from Applications. Click the shield in the menu bar and choose **Install Helper…** (one administrator prompt). Then open **Settings…**, add a connection, and connect.
 
 The app isn't notarized yet. If you download a build instead of compiling it, macOS will block the first launch: open **System Settings → Privacy & Security** and click **Open Anyway**.

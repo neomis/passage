@@ -11,27 +11,31 @@ final class ProfileEditor: ObservableObject {
     @Published var psk = ""
     @Published var tab = "general"
     @Published private(set) var original = Profile()
-    @Published private(set) var originalPassword = ""
-    @Published private(set) var originalPSK = ""
+    // Saved secrets are never read into the editor: reading them makes macOS ask for
+    // permission. The fields stay empty and only replace a secret when you type one.
+    @Published private(set) var hasSavedPassword = false
+    @Published private(set) var hasSavedPSK = false
     @Published var saveMessage = ""
 
     weak var store: ProfileStore?
 
-    var isDirty: Bool { draft != original || password != originalPassword || psk != originalPSK }
+    var isDirty: Bool { draft != original || !password.isEmpty || !psk.isEmpty }
 
     func load() {
         guard let id = selectedID, let p = store?.profile(id) else { return }
         draft = p; original = p
-        password = Keychain.get(id, .password); originalPassword = password
-        psk = Keychain.get(id, .psk); originalPSK = psk
+        password = ""; psk = ""
+        hasSavedPassword = Keychain.exists(id, .password)
+        hasSavedPSK = Keychain.exists(id, .psk)
         saveMessage = ""
     }
 
     func save() {
         guard let store else { return }
         store.update(draft)
-        Keychain.set(draft.askPasswordEachTime ? "" : password, for: draft.id, .password)
-        Keychain.set(psk, for: draft.id, .psk)
+        if draft.askPasswordEachTime { Keychain.delete(draft.id, .password) }
+        else if !password.isEmpty { Keychain.set(password, for: draft.id, .password) }
+        if !psk.isEmpty { Keychain.set(psk, for: draft.id, .psk) }
         load()
         saveMessage = "Saved"
     }
@@ -168,7 +172,8 @@ private struct GeneralTab: View {
                 TextField("Username", text: $editor.draft.username)
                 Toggle("Ask for password every time", isOn: $editor.draft.askPasswordEachTime)
                 if !editor.draft.askPasswordEachTime {
-                    SecureField("Password", text: $editor.password)
+                    SecureField("Password", text: $editor.password,
+                                prompt: Text(editor.hasSavedPassword ? "Saved – type to replace" : "Required"))
                 }
                 TextField("NT domain", text: $editor.draft.ntDomain, prompt: Text("Optional"))
             }
@@ -193,7 +198,8 @@ private struct IPsecTab: View {
             if editor.draft.ipsecEnabled {
                 Section("Machine authentication") {
                     LabeledContent("Type") { Text("Pre-shared key") }
-                    SecureField("Pre-shared key", text: $editor.psk)
+                    SecureField("Pre-shared key", text: $editor.psk,
+                                prompt: Text(editor.hasSavedPSK ? "Saved – type to replace" : "Required"))
                     TextField("Remote ID", text: $editor.draft.remoteID, prompt: Text("Optional, e.g. the gateway's IP or FQDN"))
                     TextField("Local ID", text: $editor.draft.localID, prompt: Text("Optional"))
                 }

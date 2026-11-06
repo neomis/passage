@@ -106,6 +106,14 @@ enum Keychain {
         return String(decoding: d, as: UTF8.self)
     }
 
+    /// Whether a secret is saved, without reading it (so macOS doesn't ask for permission).
+    static func exists(_ id: String, _ s: Secret) -> Bool {
+        var q = query(id, s)
+        q[kSecReturnAttributes as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
+    }
+
     static func set(_ value: String, for id: String, _ s: Secret) {
         if value.isEmpty { delete(id, s); return }
         let data = Data(value.utf8)

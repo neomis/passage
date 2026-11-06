@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct MenuPanel: View {
     @ObservedObject var store: ProfileStore
@@ -176,9 +177,63 @@ struct MenuBarIcon: View {
     @ObservedObject var vpn: VPNController
     var body: some View {
         switch vpn.state {
-        case .connected: Image(systemName: "lock.shield.fill")
-        case .connecting, .disconnecting: Image(systemName: "shield.lefthalf.filled")
-        case .disconnected: Image(systemName: "shield")
+        case .connected: Image(nsImage: LampIcon.image(.lit))
+        case .connecting, .disconnecting: Image(nsImage: LampIcon.image(.dim))
+        case .disconnected: Image(nsImage: LampIcon.image(.off))
         }
+    }
+}
+
+/// The menu bar lamp post. Off and dim are template images, so macOS colors them to
+/// match the menu bar. Lit draws a yellow lantern, and resolves the post's color
+/// when drawn so it suits light and dark menu bars.
+enum LampIcon {
+    enum Look { case off, dim, lit }
+
+    private static var cache: [Look: NSImage] = [:]
+
+    static func image(_ look: Look) -> NSImage {
+        if let img = cache[look] { return img }
+        let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            draw(look); return true
+        }
+        img.isTemplate = look != .lit
+        img.accessibilityDescription = look == .lit ? "Passage: connected" : "Passage"
+        cache[look] = img
+        return img
+    }
+
+    private static func draw(_ look: Look) {
+        let ink = look == .lit ? NSColor.labelColor : NSColor.black
+        let light = NSColor(srgbRed: 1.0, green: 0.78, blue: 0.24, alpha: 1)
+
+        if look == .lit {   // soft halo behind the lantern
+            let c = NSPoint(x: 9, y: 11.8)
+            NSGradient(colors: [light.withAlphaComponent(0.55), light.withAlphaComponent(0)])!
+                .draw(fromCenter: c, radius: 0, toCenter: c, radius: 6.2, options: [])
+        }
+
+        ink.setFill()
+        NSBezierPath(roundedRect: NSRect(x: 6, y: 0.5, width: 6, height: 2), xRadius: 0.6, yRadius: 0.6).fill()  // base
+        NSBezierPath(rect: NSRect(x: 8.25, y: 2.5, width: 1.5, height: 6)).fill()                                // post
+        NSBezierPath(rect: NSRect(x: 5.5, y: 6.2, width: 7, height: 1)).fill()                                   // crossbar
+        NSBezierPath(rect: NSRect(x: 7, y: 8.2, width: 4, height: 1.2)).fill()                                   // collar
+
+        // Lantern glass (tapered) and roof
+        let glass = NSBezierPath()
+        glass.move(to: NSPoint(x: 7.2, y: 9.4)); glass.line(to: NSPoint(x: 10.8, y: 9.4))
+        glass.line(to: NSPoint(x: 11.8, y: 14.2)); glass.line(to: NSPoint(x: 6.2, y: 14.2)); glass.close()
+        switch look {
+        case .lit: light.setFill(); glass.fill()
+        case .dim: NSColor.black.withAlphaComponent(0.45).setFill(); glass.fill()
+        case .off: break
+        }
+        ink.setStroke(); glass.lineWidth = 1.1; glass.stroke()
+
+        ink.setFill()
+        let roof = NSBezierPath()
+        roof.move(to: NSPoint(x: 5.4, y: 14.2)); roof.line(to: NSPoint(x: 12.6, y: 14.2))
+        roof.line(to: NSPoint(x: 9.7, y: 16.4)); roof.line(to: NSPoint(x: 8.3, y: 16.4)); roof.close(); roof.fill()
+        NSBezierPath(ovalIn: NSRect(x: 8.2, y: 16.2, width: 1.6, height: 1.6)).fill()                            // finial
     }
 }
